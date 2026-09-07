@@ -24,7 +24,16 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/corretto-keyring.gpg] https://apt.corretto.aws stable main" | sudo tee /etc/apt/sources.list.d/corretto.list
           sudo apt-get update -qq
           sudo apt-get install -y java-25-amazon-corretto-jdk
-          java -version
+          CORRETTO_JAVA=$(find /usr/lib/jvm/ -name "java" -path "*java-25*bin/java" | head -n 1)
+          if [ -z "$CORRETTO_JAVA" ]; then
+            CORRETTO_JAVA=$(which java)
+          fi
+          echo "Found Java 25 binary at: $CORRETTO_JAVA"
+          sudo update-alternatives --set java "$CORRETTO_JAVA" || true
+          JAVA_HOME_DIR=$(dirname $(dirname "$CORRETTO_JAVA"))
+          echo "JAVA_HOME=$JAVA_HOME_DIR" >> $GITHUB_ENV
+          echo "PATH=$JAVA_HOME_DIR/bin:$PATH" >> $GITHUB_ENV
+          "$CORRETTO_JAVA" -version
 
       - name: Set up Python Environment
         uses: actions/setup-python@v5

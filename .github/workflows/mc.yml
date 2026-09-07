@@ -158,29 +158,10 @@ jobs:
       - name: Launch Minecraft Server via Supervisor
         env:
           PLAYIT_SECRET_KEY: ${{ secrets.PLAYIT_SECRET_KEY }}
+          CLONE_PAT: ${{ secrets.CLONE_PAT }}
         run: |
           cd server
-
-          echo "================================================================"
-          echo "Starting Playit TCP Tunnel..."
-          echo "================================================================"
-          if [ -n "$PLAYIT_SECRET_KEY" ]; then
-            echo "Running Playit with configured secret key..."
-            playit --secret "$PLAYIT_SECRET_KEY" run &
-          else
-            echo "Running Playit in claim mode (no secret key configured yet)..."
-            playit run &
-          fi
-          PLAYIT_PID=$!
-
-          # Give Playit 4 seconds to output claim link or connect
-          sleep 4
-
-          # Launch Minecraft Paper Server
           python -u supervisor.py
-
-          # Terminate tunnel when server stops
-          kill -9 $PLAYIT_PID 2>/dev/null || true
 
       - name: Archive & Upload World Snapshot to GitHub Releases
         if: always()

@@ -95,18 +95,20 @@ jobs:
           cd server
           USER_AGENT="silver-smp-runner/1.0 (admin@silver-kun.org)"
 
-          # 1. Download PaperMC
-          echo "Fetching latest Paper build..."
-          PAPER_URL=$(curl -s -H "User-Agent: $USER_AGENT" "https://fill.papermc.io/v3/projects/paper/versions/26.2/builds" | jq -r 'map(select(.channel == "STABLE")) | .[0] | "https://fill-data.papermc.io/v3/projects/paper/versions/26.2/builds/" + (.id | tostring) + "/downloads/" + .downloads.application.name' 2>/dev/null || echo "")
+          # 1. Download PaperMC from Fill v3 API
+          echo "Fetching latest Paper 26.2 build..."
+          BUILDS_JSON=$(curl -s -H "User-Agent: $USER_AGENT" "https://fill.papermc.io/v3/projects/paper/versions/26.2/builds")
+          PAPER_URL=$(echo "$BUILDS_JSON" | jq -r 'map(select(.channel == "STABLE")) | .[0].downloads."server:default".url' 2>/dev/null || echo "")
 
           if [ -z "$PAPER_URL" ] || [ "$PAPER_URL" == "null" ]; then
-            # Fallback to 1.21.4 stable if 26.2 Fill build is in testing
             echo "Falling back to 1.21.4 stable..."
-            PAPER_URL=$(curl -s -H "User-Agent: $USER_AGENT" "https://fill.papermc.io/v3/projects/paper/versions/1.21.4/builds" | jq -r 'map(select(.channel == "STABLE")) | .[0] | "https://fill-data.papermc.io/v3/projects/paper/versions/1.21.4/builds/" + (.id | tostring) + "/downloads/" + .downloads.application.name')
+            BUILDS_JSON=$(curl -s -H "User-Agent: $USER_AGENT" "https://fill.papermc.io/v3/projects/paper/versions/1.21.4/builds")
+            PAPER_URL=$(echo "$BUILDS_JSON" | jq -r 'map(select(.channel == "STABLE")) | .[0].downloads."server:default".url')
           fi
 
           echo "Downloading Paper from: $PAPER_URL"
-          curl -s -H "User-Agent: $USER_AGENT" -o paper.jar "$PAPER_URL"
+          curl -sL -H "User-Agent: $USER_AGENT" -o paper.jar "$PAPER_URL"
+          ls -lh paper.jar
 
           # 2. Download Plugins (Minekube Connect, ViaVersion, ViaBackwards, TAB)
           echo "Downloading Minekube Connect plugin..."

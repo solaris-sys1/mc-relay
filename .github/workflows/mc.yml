@@ -1,6 +1,8 @@
 name: Minecraft 26.2 SMP Relay Node
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       cycle_count:

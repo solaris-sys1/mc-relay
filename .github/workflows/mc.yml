@@ -40,10 +40,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install System Compression Tools
+      - name: Install System Compression Tools & Playit Agent
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y zstd pigz jq curl
+          echo "Installing Playit agent binary..."
+          sudo curl -SsL -o /usr/local/bin/playit https://github.com/playit-cloud/playit-agent/releases/download/v1.0.10/playit-linux-amd64
+          sudo chmod +x /usr/local/bin/playit
+          playit --version || true
 
       - name: Predecessor Handshake & Port Cleanup
         env:
@@ -152,9 +156,31 @@ jobs:
           fi
 
       - name: Launch Minecraft Server via Supervisor
+        env:
+          PLAYIT_SECRET_KEY: ${{ secrets.PLAYIT_SECRET_KEY }}
         run: |
           cd server
+
+          echo "================================================================"
+          echo "Starting Playit TCP Tunnel..."
+          echo "================================================================"
+          if [ -n "$PLAYIT_SECRET_KEY" ]; then
+            echo "Running Playit with configured secret key..."
+            playit --secret "$PLAYIT_SECRET_KEY" run &
+          else
+            echo "Running Playit in claim mode (no secret key configured yet)..."
+            playit run &
+          fi
+          PLAYIT_PID=$!
+
+          # Give Playit 4 seconds to output claim link or connect
+          sleep 4
+
+          # Launch Minecraft Paper Server
           python -u supervisor.py
+
+          # Terminate tunnel when server stops
+          kill -9 $PLAYIT_PID 2>/dev/null || true
 
       - name: Archive & Upload World Snapshot to GitHub Releases
         if: always()

@@ -40,23 +40,37 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install System Compression Tools & Playit Agent
+      - name: Install System Compression Tools, Rclone & Playit Agent
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y zstd pigz jq curl
+          sudo apt-get install -y zstd pigz jq curl rclone
           echo "Installing Playit agent binary..."
           sudo curl -SsL -o /usr/local/bin/playit https://github.com/playit-cloud/playit-agent/releases/download/v1.0.10/playit-linux-amd64
           sudo chmod +x /usr/local/bin/playit
           playit --version || true
+
+      - name: Setup Headless Rclone Storage Vault
+        env:
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          if [ -n "$RCLONE_CONFIG_GDRIVE" ]; then
+            echo "[VAULT] Configuring Google Drive rclone remote..."
+            mkdir -p ~/.config/rclone
+            echo "$RCLONE_CONFIG_GDRIVE" > ~/.config/rclone/rclone.conf
+            echo "HAS_GDRIVE=true" >> $GITHUB_ENV
+          else
+            echo "[VAULT] No RCLONE_CONFIG_GDRIVE found. Defaulting to GitHub Releases vault."
+            echo "HAS_GDRIVE=false" >> $GITHUB_ENV
+          fi
 
       - name: Predecessor Handshake & Port Cleanup
         env:
           PREV_PAT: ${{ secrets.PREV_PAT }}
         run: |
           REPOS=(
-            "neon-drifter/mc-relay"
-            "cloud-strider1/mc-relay"
-            "rusty-quill/mc-relay"
+            "ember-ops1/mc-relay"
+            "silver-weaver/mc-relay"
+            "moss-and-wire/mc-relay"
             "solaris-sys1/mc-relay"
           )
           CURRENT_INDEX=-1
@@ -138,40 +152,81 @@ jobs:
 
           ls -la plugins/
 
-      - name: Restore World State from GitHub Releases
+      - name: Restore World State (Google Drive or GitHub Split Releases)
         env:
           CLONE_PAT: ${{ secrets.CLONE_PAT }}
         run: |
           cd server
-          echo "Checking for latest world release..."
+          echo "[RESTORE] Checking storage sources..."
 
-          # Attempt to download world-latest.tar.zst from private repo releases
-          if GH_TOKEN="$CLONE_PAT" gh release download "world-latest" --repo "Silver-kun/minecraft-server" --pattern "world-latest.tar.zst" 2>/dev/null; then
-            echo "World archive downloaded! Decompressing..."
-            tar --zstd -xf world-latest.tar.zst
-            rm -f world-latest.tar.zst
-            echo "World state restored successfully."
+          # Source A: Google Drive Delta Restore
+          if [ "$HAS_GDRIVE" == "true" ] && rclone lsf gdrive:mc-fleet/world/ >/dev/null 2>&1; then
+            echo "[RESTORE] Pulling delta chunks from Google Drive vault..."
+            rclone sync gdrive:mc-fleet/world/ ./world/ --fast-list --update --transfers 8
+            rclone sync gdrive:mc-fleet/world_nether/ ./world_nether/ --fast-list --update --transfers 8 2>/dev/null || true
+            rclone sync gdrive:mc-fleet/world_the_end/ ./world_the_end/ --fast-list --update --transfers 8 2>/dev/null || true
+            rclone sync gdrive:mc-fleet/plugins_state/ ./plugins/ --fast-list --update 2>/dev/null || true
+            echo "[RESTORE] Google Drive delta restore complete!"
           else
-            echo "No prior world archive found. A pristine world will be generated."
+            # Source B: GitHub Releases (with Multi-Part Chunk Reassembly)
+            echo "[RESTORE] Checking GitHub Releases for world snapshot..."
+            mkdir -p /tmp/mc_restore
+            if GH_TOKEN="$CLONE_PAT" gh release download "world-latest" --repo "Silver-kun/minecraft-server" --dir /tmp/mc_restore --pattern "*" 2>/dev/null; then
+              cd /tmp/mc_restore
+              # Check for multi-part sliced chunks
+              if compgen -G "world-chunk.*.part" > /dev/null; then
+                echo "[RESTORE] Multi-part chunk slice detected. Reassembling via cat..."
+                cat world-chunk.*.part > world-latest.tar.zst
+              fi
+
+              if [ -f "world-latest.tar.zst" ]; then
+                echo "[RESTORE] Unpacking zstd archive into server root..."
+                tar -I zstd -xf world-latest.tar.zst -C "$GITHUB_WORKSPACE/server"
+                echo "[RESTORE] World restoration completed successfully!"
+              fi
+              cd "$GITHUB_WORKSPACE/server"
+              rm -rf /tmp/mc_restore
+            else
+              echo "[RESTORE] No prior world snapshot found. A fresh world will be generated."
+            fi
           fi
 
       - name: Launch Minecraft Server via Supervisor
         env:
           PLAYIT_SECRET_KEY: ${{ secrets.PLAYIT_SECRET_KEY }}
           CLONE_PAT: ${{ secrets.CLONE_PAT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
         run: |
           cd server
           python -u supervisor.py
 
-      - name: Archive & Upload World Snapshot to GitHub Releases
+      - name: Kill Tunnel Process to Prevent Agent Collision
+        if: always()
+        run: |
+          echo "[CLEANUP] Stopping Playit agent to release edge socket..."
+          pkill -9 -f playit || true
+          sleep 2
+
+      - name: Archive & Upload World Snapshot (Google Drive & Multi-Part GitHub Releases)
         if: always()
         env:
           CLONE_PAT: ${{ secrets.CLONE_PAT }}
         run: |
           cd server
-          echo "Creating compressed world snapshot with zstd multithreading..."
+          echo "[BACKUP] Initiating world backup..."
 
-          # Include world folders, playerdata, stats, advancements, and plugin states
+          # 1. Sync to Google Drive if configured
+          if [ "$HAS_GDRIVE" == "true" ]; then
+            echo "[BACKUP] Syncing raw delta region folders to Google Drive..."
+            rclone sync ./world/ gdrive:mc-fleet/world/ --fast-list --update --drive-chunk-size 32M --drive-use-trash=false --exclude "session.lock"
+            rclone sync ./world_nether/ gdrive:mc-fleet/world_nether/ --fast-list --update --drive-chunk-size 32M --drive-use-trash=false --exclude "session.lock" 2>/dev/null || true
+            rclone sync ./world_the_end/ gdrive:mc-fleet/world_the_end/ --fast-list --update --drive-chunk-size 32M --drive-use-trash=false --exclude "session.lock" 2>/dev/null || true
+            echo "[BACKUP] Google Drive sync complete!"
+          fi
+
+          # 2. Package Multi-Part Zstd Snapshot for GitHub Releases
           DIRS_TO_SAVE=""
           for d in world world_nether world_the_end plugins/TAB plugins/connect; do
             if [ -d "$d" ]; then
@@ -180,18 +235,30 @@ jobs:
           done
 
           if [ -n "$DIRS_TO_SAVE" ]; then
-            tar --zstd -cf world-latest.tar.zst $DIRS_TO_SAVE
-            echo "Created world-latest.tar.zst (Size: $(du -h world-latest.tar.zst | cut -f1))"
+            echo "[BACKUP] Packaging zstd archive..."
+            tar -cf - $DIRS_TO_SAVE | zstd -3 -T0 > world-latest.tar.zst
+            FILE_SIZE_MB=$(du -m world-latest.tar.zst | cut -f1)
+            echo "[BACKUP] Archive size: ${FILE_SIZE_MB} MB"
 
-            # Create or update 'world-latest' tag in private repo releases
-            echo "Uploading world snapshot to Silver-kun/minecraft-server releases..."
+            rm -f world-chunk.*.part
+            if [ "$FILE_SIZE_MB" -gt 1500 ]; then
+              echo "[BACKUP] Size exceeds 1.5GB. Slicing into 1.5GB binary chunks..."
+              split -b 1500M -d --additional-suffix=.part world-latest.tar.zst "world-chunk."
+              UPLOAD_FILES=(world-chunk.*.part)
+            else
+              UPLOAD_FILES=(world-latest.tar.zst)
+            fi
+
+            sha256sum "${UPLOAD_FILES[@]}" > checksums.txt
+
+            echo "[BACKUP] Uploading to Silver-kun/minecraft-server releases..."
             GH_TOKEN="$CLONE_PAT" gh release delete "world-latest" --repo "Silver-kun/minecraft-server" -y 2>/dev/null || true
             git tag -d "world-latest" 2>/dev/null || true
-            GH_TOKEN="$CLONE_PAT" gh release create "world-latest" world-latest.tar.zst \
+            GH_TOKEN="$CLONE_PAT" gh release create "world-latest" "${UPLOAD_FILES[@]}" checksums.txt \
               --repo "Silver-kun/minecraft-server" \
-              --title "Automated World Snapshot" \
-              --notes "Rolling atomic snapshot generated at $(date -u)"
-            echo "World snapshot uploaded successfully!"
+              --title "Automated World Snapshot $(date -u +'%Y-%m-%d %H:%M UTC')" \
+              --notes "Rolling zero-loss snapshot."
+            echo "[BACKUP] World snapshot successfully archived!"
           fi
 
       - name: Automated Successor Handover
@@ -202,9 +269,9 @@ jobs:
           CYCLE_COUNT: ${{ github.event.client_payload.cycle_count || github.event.inputs.cycle_count || '0' }}
         run: |
           REPOS=(
-            "neon-drifter/mc-relay"
-            "cloud-strider1/mc-relay"
-            "rusty-quill/mc-relay"
+            "ember-ops1/mc-relay"
+            "silver-weaver/mc-relay"
+            "moss-and-wire/mc-relay"
             "solaris-sys1/mc-relay"
           )
 
